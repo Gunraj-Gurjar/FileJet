@@ -55,6 +55,13 @@ FileJet is a production-ready, peer-to-peer file sharing platform. Files transfe
 
 ---
 
+## Recent Updates
+
+- **Local Network QR Code Sharing**: Implemented a dynamic API route (`/api/network-ip`) that detects the host's LAN IP. Scanning the generated QR code with a phone seamlessly routes directly to the application on your local Wi-Fi, bypassing `localhost` limitations.
+- **Robust WebRTC DataChannels**: Eliminated P2P transfer stalling (previously hanging at 86%). Removed unreliable `maxRetransmits` settings to ensure TCP-like reliability and updated the receiver logic to independently assemble file chunks without race-prone completion events.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
