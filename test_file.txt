@@ -1,0 +1,5 @@
+This is a test file for verifying the WebRTC P2P file transfer.
+It contains some text robust enough to be chunked if we make it large.
+0123456789
+abcdefghijklmnopqrstuvwxyz
+ABCDEFGHIJKLMNOPQRSTUVWXYZ

@@ -27,12 +27,37 @@ const BUFFER_THRESHOLD = 1 * 1024 * 1024;
 const MAX_BUFFER_SIZE = 4 * 1024 * 1024;
 
 /**
- * Create a configured RTCPeerConnection.
- * @returns {RTCPeerConnection}
+ * Create a configured RTCPeerConnection, fetching ICE servers (TURN) from the backend.
+ * @returns {Promise<RTCPeerConnection>}
  */
-export function createPeerConnection() {
+export async function createPeerConnection() {
+    let iceServers = ICE_SERVERS; // Start with default STUN
+
+    try {
+        // Build the correct API URL regardless of where Next.js is running (client or SSR)
+        const getDynamicServerUrl = () => {
+            if (typeof window !== 'undefined') {
+                return `http://${window.location.hostname}:3001`;
+            }
+            return 'http://localhost:3001';
+        };
+        const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || getDynamicServerUrl();
+
+        // Fetch TURN credentials
+        const response = await fetch(`${SERVER_URL}/api/ice-servers`);
+        if (response.ok) {
+            const turnServers = await response.json();
+            if (turnServers && turnServers.length > 0) {
+                iceServers = [...ICE_SERVERS, ...turnServers];
+                console.log('[WebRTC] Fetched TURN servers successfully');
+            }
+        }
+    } catch (err) {
+        console.warn('[WebRTC] Failed to fetch TURN credentials, falling back to STUN only', err);
+    }
+
     const pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
+        iceServers: iceServers,
         iceCandidatePoolSize: 10,
     });
 

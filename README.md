@@ -59,6 +59,7 @@ FileJet is a production-ready, peer-to-peer file sharing platform. Files transfe
 
 - **Local Network QR Code Sharing**: Implemented a dynamic API route (`/api/network-ip`) that detects the host's LAN IP. Scanning the generated QR code with a phone seamlessly routes directly to the application on your local Wi-Fi, bypassing `localhost` limitations.
 - **Robust WebRTC DataChannels**: Eliminated P2P transfer stalling (previously hanging at 86%). Removed unreliable `maxRetransmits` settings to ensure TCP-like reliability and updated the receiver logic to independently assemble file chunks without race-prone completion events.
+- **Production-Ready NAT Traversal (TURN)**: Integrated **Metered** TURN servers to guarantee connection success for users behind symmetric NATs, mobile carrier networks, and restrictive corporate firewalls. Short-lived TURN credentials are automatically fetched via our signaling server backend without exposing the master key.
 
 ---
 
@@ -69,7 +70,7 @@ FileJet is a production-ready, peer-to-peer file sharing platform. Files transfe
 | Frontend | Next.js 15, React 19, Tailwind CSS 4 |
 | Animations | Framer Motion |
 | Backend | Node.js, Express, Socket.IO |
-| Networking | WebRTC DataChannels, STUN |
+| Networking | WebRTC DataChannels, STUN, **Metered TURN** |
 | Encryption | Web Crypto API (AES-256-GCM) |
 | QR Codes | qrcode.react |
 
@@ -140,6 +141,10 @@ cp .env.example server/.env
 # Create client env
 echo "NEXT_PUBLIC_SERVER_URL=http://localhost:3001" > client/.env.local
 echo "NEXT_PUBLIC_APP_URL=http://localhost:3000" >> client/.env.local
+
+# Add Metered TURN API credentials (if available) to server folder
+echo "METERED_DOMAIN=your_app.metered.live" >> server/.env
+echo "TURN_SECRET_KEY=your_secret_key" >> server/.env
 ```
 
 ### 3. Run Development
@@ -248,7 +253,7 @@ For persistent sessions, replace `sessionStore.js` with MongoDB:
 ## Future Roadmap
 
 - [ ] **Multi-file transfers** — send folders/multiple files at once
-- [ ] **TURN server integration** — Coturn for corporate firewalls
+- [x] **TURN server integration** — Integrated Metered.ca TURN server handling for NAT traversal
 - [ ] **MongoDB persistence** — user accounts, transfer history
 - [ ] **Cloud backup option** — S3-compatible temporary storage
 - [ ] **Mobile apps** — React Native clients

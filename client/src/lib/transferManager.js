@@ -103,7 +103,7 @@ export async function createTransfer(file, options = {}) {
 
             try {
                 // Create peer connection
-                peerConnection = createPeerConnection();
+                peerConnection = await createPeerConnection();
 
                 // Create data channel
                 dataChannel = createDataChannel(peerConnection);
@@ -254,7 +254,7 @@ export async function joinTransfer(sessionId, options = {}) {
                 try {
                     onStateChange?.(TRANSFER_STATES.CONNECTING);
 
-                    peerConnection = createPeerConnection();
+                    peerConnection = await createPeerConnection();
 
                     // Handle ICE candidates
                     peerConnection.onicecandidate = (event) => {

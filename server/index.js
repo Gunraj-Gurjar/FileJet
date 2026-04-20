@@ -4,6 +4,7 @@
  * Express + Socket.IO server that handles:
  * 1. REST API for session management (create, get, delete transfer sessions)
  * 2. WebSocket signaling for WebRTC peer connection (offer/answer/ICE relay)
+ * 3. Fetching temporary TURN credentials for NAT traversal
  * 
  * The server NEVER touches file data — all file transfers happen
  * directly between browsers via WebRTC DataChannels.
@@ -16,19 +17,23 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const sessionStore = require('./sessionStore');
 const { initSignaling } = require('./signaling');
+const { getTurnCredentials } = require('./turn'); // NEW: Include TURN module
 
 const app = express();
 const server = http.createServer(app);
 
 // ─── CORS Configuration ─────────────────────────────────────────
 
-app.use(cors({ origin: true, credentials: true }));
+// NEW: Use CLIENT_URL from .env or fallback to true (allow all) for dev
+const allowedOrigin = process.env.CLIENT_URL || true;
+
+app.use(cors({ origin: allowedOrigin, credentials: true }));
 app.use(express.json());
 
 // ─── Socket.IO Setup ────────────────────────────────────────────
 const io = new Server(server, {
     cors: {
-        origin: true,
+        origin: allowedOrigin,
         methods: ['GET', 'POST'],
         credentials: true,
     },
@@ -51,6 +56,25 @@ app.get('/health', (req, res) => {
         activeSessions: sessionStore.size,
         timestamp: new Date().toISOString(),
     });
+});
+
+/**
+ * NEW: GET /api/ice-servers
+ * Fetch short-lived TURN credentials from Metered
+ */
+app.get('/api/ice-servers', async (req, res) => {
+    try {
+        const credentials = await getTurnCredentials();
+        if (credentials) {
+            res.json(credentials);
+        } else {
+            // Null means .env not configured; return empty array so client falls back to STUN alone
+            res.json([]);
+        }
+    } catch (err) {
+        console.error('[API] Error fetching TURN credentials:', err.message);
+        res.status(500).json({ error: 'Failed to fetch ICE servers' });
+    }
 });
 
 /**
