@@ -8,6 +8,13 @@
     <img src="https://img.shields.io/badge/Next.js-15-black?style=for-the-badge" alt="Next.js" />
     <img src="https://img.shields.io/badge/Max_Size-100GB+-purple?style=for-the-badge" alt="Max Size" />
   </p>
+  <p>
+    <img src="https://img.shields.io/badge/Backend-Live_on_Render-46E3B7?style=for-the-badge&logo=render" alt="Render" />
+    <img src="https://img.shields.io/badge/TURN-Metered.ca-orange?style=for-the-badge" alt="TURN" />
+  </p>
+  <p>
+    <strong>🔗 Live Backend:</strong> <a href="https://filejet.onrender.com/health">https://filejet.onrender.com</a>
+  </p>
 </div>
 
 ---
@@ -110,6 +117,7 @@ filejet/
 │   ├── index.js               # Server entry point
 │   ├── signaling.js           # WebRTC signaling handlers
 │   ├── sessionStore.js        # In-memory session storage
+│   ├── turn.js                # Metered TURN credential vending
 │   └── .env
 ├── package.json               # Root workspace
 ├── .env.example
@@ -127,8 +135,8 @@ filejet/
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/your-org/filejet.git
-cd filejet
+git clone https://github.com/Gunraj-Gurjar/FileJet.git
+cd FileJet
 npm run install:all
 ```
 
@@ -165,6 +173,35 @@ Visit **http://localhost:3000** in your browser.
 
 ## Deployment
 
+### Backend → Render ✅ (Live)
+
+The signaling server is deployed on **Render** at:
+
+> **https://filejet.onrender.com**
+
+| Setting | Value |
+|---------|-------|
+| Service Type | Web Service (Free) |
+| Root Directory | `server` |
+| Build Command | `npm install` |
+| Start Command | `npm start` |
+| Runtime | Node |
+
+**Environment variables set on Render:**
+
+| Variable | Description |
+|----------|-------------|
+| `NODE_ENV` | `production` |
+| `CLIENT_URL` | Frontend origin for CORS |
+| `METERED_DOMAIN` | Metered.ca app domain |
+| `TURN_SECRET_KEY` | Metered.ca API secret key |
+
+**Verify endpoints:**
+- Health check: [`/health`](https://filejet.onrender.com/health)
+- ICE servers: [`/api/ice-servers`](https://filejet.onrender.com/api/ice-servers)
+
+> ⚠️ Free tier instances spin down after inactivity (~50s cold start on first request).
+
 ### Frontend → Vercel
 
 ```bash
@@ -173,16 +210,8 @@ npx vercel --prod
 ```
 
 Set environment variables in Vercel:
-- `NEXT_PUBLIC_SERVER_URL` = your backend URL
+- `NEXT_PUBLIC_SERVER_URL` = `https://filejet.onrender.com`
 - `NEXT_PUBLIC_APP_URL` = your Vercel domain
-
-### Backend → Render / Railway
-
-1. Create a new Web Service
-2. Set root directory to `server/`
-3. Build command: `npm install`
-4. Start command: `npm start`
-5. Set `PORT` and `CLIENT_URL` env vars
 
 ### Database (Optional)
 
@@ -254,6 +283,8 @@ For persistent sessions, replace `sessionStore.js` with MongoDB:
 
 - [ ] **Multi-file transfers** — send folders/multiple files at once
 - [x] **TURN server integration** — Integrated Metered.ca TURN server handling for NAT traversal
+- [x] **Backend deployment** — Live on Render at https://filejet.onrender.com
+- [ ] **Frontend deployment** — Deploy Next.js client to Vercel
 - [ ] **MongoDB persistence** — user accounts, transfer history
 - [ ] **Cloud backup option** — S3-compatible temporary storage
 - [ ] **Mobile apps** — React Native clients
