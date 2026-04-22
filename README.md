@@ -13,6 +13,7 @@
     <img src="https://img.shields.io/badge/TURN-Metered.ca-orange?style=for-the-badge" alt="TURN" />
   </p>
   <p>
+    <strong>🔗 Live App:</strong> <a href="https://filejet-client-eta.vercel.app">https://filejet-client-eta.vercel.app</a><br/>
     <strong>🔗 Live Backend:</strong> <a href="https://filejet.onrender.com/health">https://filejet.onrender.com</a>
   </p>
 </div>
@@ -202,16 +203,22 @@ The signaling server is deployed on **Render** at:
 
 > ⚠️ Free tier instances spin down after inactivity (~50s cold start on first request).
 
-### Frontend → Vercel
+### Frontend → Vercel ✅ (Live)
 
-```bash
-cd client
-npx vercel --prod
-```
+The Next.js client is deployed on **Vercel** at:
 
-Set environment variables in Vercel:
-- `NEXT_PUBLIC_SERVER_URL` = `https://filejet.onrender.com`
-- `NEXT_PUBLIC_APP_URL` = your Vercel domain
+> **https://filejet-client-eta.vercel.app**
+
+| Setting | Value |
+|---------|-------|
+| Root Directory | `client` |
+| Framework | Next.js |
+
+**Environment variables set on Vercel:**
+
+| Variable | Description |
+|----------|-------------|
+| `NEXT_PUBLIC_SERVER_URL` | `https://filejet.onrender.com` |
 
 ### Database (Optional)
 
@@ -284,7 +291,7 @@ For persistent sessions, replace `sessionStore.js` with MongoDB:
 - [ ] **Multi-file transfers** — send folders/multiple files at once
 - [x] **TURN server integration** — Integrated Metered.ca TURN server handling for NAT traversal
 - [x] **Backend deployment** — Live on Render at https://filejet.onrender.com
-- [ ] **Frontend deployment** — Deploy Next.js client to Vercel
+- [x] **Frontend deployment** — Live on Vercel at https://filejet-client-eta.vercel.app
 - [ ] **MongoDB persistence** — user accounts, transfer history
 - [ ] **Cloud backup option** — S3-compatible temporary storage
 - [ ] **Mobile apps** — React Native clients
