@@ -46,8 +46,10 @@ function initSignaling(io) {
 
             // Update session connection state
             if (role === 'sender') {
+                session.senderConnected = true;
                 sessionStore.update(sessionId, { senderConnected: true });
             } else {
+                session.receiverConnected = true;
                 sessionStore.update(sessionId, { receiverConnected: true });
             }
 
@@ -64,6 +66,8 @@ function initSignaling(io) {
                     fileSize: session.fileSize,
                     fileType: session.fileType,
                 },
+                senderConnected: session.senderConnected,
+                receiverConnected: session.receiverConnected
             });
         });
 

@@ -81,18 +81,7 @@ export async function createTransfer(file, options = {}) {
 
         onStateChange?.(TRANSFER_STATES.WAITING_FOR_PEER);
 
-        // 4. Join the room as sender
-        socket.emit('join-room', { sessionId, role: 'sender' }, (response) => {
-            if (response?.error) {
-                onStateChange?.(TRANSFER_STATES.ERROR);
-                console.error('[Transfer] Join error:', response.error);
-            }
-        });
-
-        // 5. When receiver joins, start WebRTC handshake
-        socket.on('peer-joined', async ({ role }) => {
-            if (role !== 'receiver') return;
-
+        const startHandshake = async () => {
             // Guard: prevent duplicate handshakes if peer-joined fires multiple times
             if (peerConnection && peerConnection.signalingState !== 'closed') {
                 console.log('[Transfer] Peer connection already exists, ignoring duplicate peer-joined');
@@ -151,6 +140,37 @@ export async function createTransfer(file, options = {}) {
                 console.error('[Transfer] WebRTC setup error:', err);
                 onStateChange?.(TRANSFER_STATES.ERROR);
             }
+        };
+
+        // 4. Join the room as sender
+        const joinAsSender = () => {
+            socket.emit('join-room', { sessionId, role: 'sender' }, (response) => {
+                if (response?.error) {
+                    onStateChange?.(TRANSFER_STATES.ERROR);
+                    console.error('[Transfer] Join error:', response.error);
+                    return;
+                }
+                
+                // If receiver is already connected (e.g. we just woke up from background)
+                if (response?.receiverConnected) {
+                    console.log('[Transfer] Receiver already present, initiating handshake...');
+                    startHandshake();
+                }
+            });
+        };
+
+        joinAsSender();
+
+        const onReconnect = () => {
+            console.log('[Transfer] Socket reconnected, re-joining room...');
+            joinAsSender();
+        };
+        socket.on('connect', onReconnect);
+
+        // 5. When receiver joins, start WebRTC handshake
+        socket.on('peer-joined', async ({ role }) => {
+            if (role !== 'receiver') return;
+            startHandshake();
         });
 
         // 6. Handle answer from receiver
@@ -189,6 +209,7 @@ export async function createTransfer(file, options = {}) {
         const cleanup = () => {
             dataChannel?.close();
             peerConnection?.close();
+            socket.off('connect', onReconnect);
             socket.off('peer-joined');
             socket.off('answer');
             socket.off('ice-candidate');
@@ -239,15 +260,33 @@ export async function joinTransfer(sessionId, options = {}) {
 
         // 3. Join room as receiver
         return new Promise((resolve, reject) => {
-            socket.emit('join-room', { sessionId, role: 'receiver', password }, (response) => {
-                if (response?.error) {
-                    onStateChange?.(TRANSFER_STATES.ERROR);
-                    reject(new Error(response.error));
-                    return;
-                }
+            let hasJoined = false;
 
-                onStateChange?.(TRANSFER_STATES.WAITING_FOR_PEER);
-            });
+            const joinAsReceiver = () => {
+                socket.emit('join-room', { sessionId, role: 'receiver', password }, (response) => {
+                    if (response?.error) {
+                        onStateChange?.(TRANSFER_STATES.ERROR);
+                        // Only reject on the first time round
+                        if (!hasJoined) reject(new Error(response.error));
+                        return;
+                    }
+                    
+                    hasJoined = true;
+                    // Switch to WAITING_FOR_PEER if we haven't received an offer yet
+                    // Don't downgrade state if we are already transferring!
+                    if (!peerConnection) {
+                        onStateChange?.(TRANSFER_STATES.WAITING_FOR_PEER);
+                    }
+                });
+            };
+
+            joinAsReceiver();
+
+            const onReconnect = () => {
+                console.log('[Transfer] Receiver socket reconnected, re-joining room...');
+                joinAsReceiver();
+            };
+            socket.on('connect', onReconnect);
 
             // 4. Handle offer from sender
             socket.on('offer', async ({ offer }) => {
@@ -331,6 +370,7 @@ export async function joinTransfer(sessionId, options = {}) {
             // Cleanup
             const cleanup = () => {
                 peerConnection?.close();
+                socket.off('connect', onReconnect);
                 socket.off('offer');
                 socket.off('ice-candidate');
                 socket.off('peer-disconnected');
