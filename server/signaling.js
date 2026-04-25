@@ -115,10 +115,18 @@ function initSignaling(io) {
             console.log(`[Signaling] Transfer complete in room ${sessionId}`);
         });
 
-        /**
-         * Handle disconnection — notify peer and update session.
-         * @event disconnect
-         */
+        // 9. Handle WebRTC fallback to Socket Relay
+        socket.on('relay-fallback-start', ({ sessionId }) => {
+            console.log(`[Signaling] Fallback to Socket relay initiated in room ${sessionId}`);
+            socket.to(sessionId).emit('relay-fallback-start');
+        });
+
+        socket.on('relay-message', ({ sessionId, data }) => {
+            // Relay the ArrayBuffer or string directly
+            socket.to(sessionId).emit('relay-message', { data });
+        });
+
+        // 10. Handle disconnections
         socket.on('disconnect', () => {
             const { sessionId, role } = socket.data;
             if (sessionId) {

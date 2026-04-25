@@ -104,8 +104,35 @@ export async function createTransfer(file, options = {}) {
                     }
                 };
 
+                // Track fallback timeout to avoid race conditions
+                let isFallbackActive = false;
+                
+                const fallbackTimeout = setTimeout(() => {
+                    if (dataChannel && dataChannel.readyState === 'open') return;
+                    
+                    console.warn('[Transfer] WebRTC connection timed out (10s). Falling back to Socket Relay.');
+                    isFallbackActive = true;
+                    
+                    // Cleanup WebRTC attempts
+                    peerConnection?.close();
+                    
+                    // Inform receiver to switch to fallback mode
+                    socket.emit('relay-fallback-start', { sessionId });
+                    
+                    // Create mock DataChannel
+                    dataChannel = new SocketDataChannel(socket, sessionId);
+                    
+                    // Manually trigger open to start transfer
+                    setTimeout(() => {
+                        if (dataChannel.onopen) dataChannel.onopen();
+                    }, 500);
+                }, 10000); // 10 second timeout
+
                 // When data channel opens, start sending
                 dataChannel.onopen = async () => {
+                    if (!isFallbackActive) {
+                        clearTimeout(fallbackTimeout);
+                    }
                     console.log('[Transfer] DataChannel open — starting file transfer');
                     onStateChange?.(TRANSFER_STATES.TRANSFERRING);
 
@@ -231,6 +258,8 @@ export async function createTransfer(file, options = {}) {
             socket.off('answer');
             socket.off('ice-candidate');
             socket.off('peer-disconnected');
+            socket.off('relay-message');
+            socket.off('peer-disconnected');
         };
 
         return {
@@ -307,9 +336,56 @@ export async function joinTransfer(sessionId, options = {}) {
 
             let pendingCandidates = [];
             let hasRemoteDescription = false;
+            let isFallbackActive = false;
+            let mockChannel = null;
+
+            // Handle WebRTC Fallback Start
+            socket.on('relay-fallback-start', () => {
+                console.warn('[Transfer] Sender requested fallback to Socket Relay.');
+                isFallbackActive = true;
+                
+                // Clean up WebRTC
+                peerConnection?.close();
+                
+                onStateChange?.(TRANSFER_STATES.TRANSFERRING);
+                
+                mockChannel = new SocketDataChannel(socket, sessionId);
+                
+                const decryption = decryptionKey
+                    ? { decrypt: decryptChunk, key: decryptionKey }
+                    : null;
+
+                const speedTracker = createSpeedTracker();
+
+                receiveFile(
+                    mockChannel,
+                    (progress) => {
+                        const total = progress.total || 0;
+                        const { speed, eta } = speedTracker.update(progress.received, total);
+                        onProgress?.({ ...progress, speed, eta });
+                    },
+                    (result) => {
+                        onStateChange?.(TRANSFER_STATES.COMPLETE);
+                        onComplete?.(result);
+                    },
+                    (err) => {
+                        onStateChange?.(TRANSFER_STATES.ERROR);
+                        console.error('[Transfer] Receive error:', err);
+                    },
+                    decryption
+                );
+            });
+
+            // Route incoming relay messages to the mock channel
+            socket.on('relay-message', ({ data }) => {
+                if (mockChannel && mockChannel.onmessage) {
+                    mockChannel.onmessage({ data });
+                }
+            });
 
             // 4. Handle offer from sender
             socket.on('offer', async ({ offer }) => {
+                if (isFallbackActive) return;
                 try {
                     onStateChange?.(TRANSFER_STATES.CONNECTING);
 
@@ -408,6 +484,8 @@ export async function joinTransfer(sessionId, options = {}) {
                 socket.off('offer');
                 socket.off('ice-candidate');
                 socket.off('peer-disconnected');
+                socket.off('relay-fallback-start');
+                socket.off('relay-message');
             };
 
             resolve({ cleanup });
@@ -463,4 +541,44 @@ function createSpeedTracker() {
             return { speed: avgSpeed, eta };
         },
     };
+}
+
+// ─── Socket Relay Fallback ──────────────────────────────────────
+
+/**
+ * A mock RTCDataChannel that proxies data over Socket.IO.
+ * Used transparently by sendFile/receiveFile when WebRTC fails.
+ */
+class SocketDataChannel {
+    constructor(socket, sessionId) {
+        this.socket = socket;
+        this.sessionId = sessionId;
+        this.readyState = 'open';
+        this.bufferedAmount = 0;
+        this.label = 'socket-fallback';
+        this.binaryType = 'arraybuffer';
+        
+        this.onmessage = null;
+        this.onopen = null;
+        this.onclose = null;
+        this.onerror = null;
+        this.onbufferedamountlow = null;
+    }
+
+    send(data) {
+        this.socket.emit('relay-message', { sessionId: this.sessionId, data });
+    }
+
+    close() {
+        this.readyState = 'closed';
+        if (this.onclose) this.onclose();
+    }
+
+    addEventListener(event, callback) {
+        if (event === 'close') this.onclose = callback;
+    }
+    
+    removeEventListener(event, callback) {
+        if (event === 'close' && this.onclose === callback) this.onclose = null;
+    }
 }
