@@ -46,8 +46,8 @@ export async function createPeerConnection() {
         };
         const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || getDynamicServerUrl();
 
-        // Fetch TURN credentials
-        const response = await fetch(`${SERVER_URL}/api/ice-servers`);
+        // Fetch TURN credentials (append timestamp to prevent caching of expired credentials)
+        const response = await fetch(`${SERVER_URL}/api/ice-servers?t=${Date.now()}`);
         if (response.ok) {
             const turnServers = await response.json();
             if (turnServers && turnServers.length > 0) {

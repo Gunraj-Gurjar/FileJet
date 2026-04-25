@@ -24,16 +24,22 @@ const server = http.createServer(app);
 
 // ─── CORS Configuration ─────────────────────────────────────────
 
-// NEW: Use CLIENT_URL from .env or fallback to true (allow all) for dev
-const allowedOrigin = process.env.CLIENT_URL || true;
+// Allow requests from any origin for maximum compatibility with Vercel preview URLs
+const corsOptions = {
+    origin: (origin, callback) => {
+        // Allow all origins (reflect origin)
+        callback(null, true);
+    },
+    credentials: true
+};
 
-app.use(cors({ origin: allowedOrigin, credentials: true }));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // ─── Socket.IO Setup ────────────────────────────────────────────
 const io = new Server(server, {
     cors: {
-        origin: allowedOrigin,
+        origin: true, // reflect origin
         methods: ['GET', 'POST'],
         credentials: true,
     },
