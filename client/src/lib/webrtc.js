@@ -36,6 +36,9 @@ export async function createPeerConnection() {
     try {
         // Build the correct API URL regardless of where Next.js is running (client or SSR)
         const getDynamicServerUrl = () => {
+            if (process.env.NODE_ENV === 'production' || (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app'))) {
+                return 'https://filejet.onrender.com';
+            }
             if (typeof window !== 'undefined') {
                 return `http://${window.location.hostname}:3001`;
             }
@@ -105,9 +108,8 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
         const totalChunks = Math.ceil(file.size / chunkSize);
         let chunkIndex = startChunk;
         let cancelled = false;
-
-        // Progress interval: small files every chunk, large files every 10
-        const progressInterval = totalChunks <= 20 ? 1 : totalChunks <= 100 ? 5 : 10;
+        let lastProgressTime = 0;
+        const PROGRESS_THROTTLE_MS = 100;
 
         const onClose = () => { cancelled = true; };
         channel.addEventListener('close', onClose);
@@ -177,8 +179,10 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
                 channel.send(chunkData);
                 chunkIndex++;
 
-                // Report progress
-                if (chunkIndex % progressInterval === 0 || chunkIndex === totalChunks) {
+                // Report progress with throttling
+                const now = Date.now();
+                if (now - lastProgressTime >= PROGRESS_THROTTLE_MS || chunkIndex === totalChunks) {
+                    lastProgressTime = now;
                     const sent = Math.min(chunkIndex * chunkSize, file.size);
                     onProgress?.({
                         sent,
@@ -189,8 +193,8 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
                     });
                 }
 
-                // Yield to event loop periodically
-                if (chunkIndex % 100 === 0) {
+                // Yield to event loop periodically to prevent UI freezes
+                if (chunkIndex % 20 === 0) {
                     await new Promise((res) => setTimeout(res, 0));
                 }
             }
@@ -263,6 +267,8 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
     let fileCompleteReceived = false;
     let expectedTotalChunks = null;
     let finalized = false;
+    let lastProgressTime = 0;
+    const PROGRESS_THROTTLE_MS = 100;
 
     channel.binaryType = 'arraybuffer';
 
@@ -290,10 +296,10 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
 
     function reportProgress() {
         if (!metadata) return;
-        const progressInterval = metadata.totalChunks <= 20 ? 1
-            : metadata.totalChunks <= 100 ? 5 : 10;
 
-        if (chunkCount % progressInterval === 0 || chunkCount === metadata.totalChunks) {
+        const now = Date.now();
+        if (now - lastProgressTime >= PROGRESS_THROTTLE_MS || chunkCount === metadata.totalChunks) {
+            lastProgressTime = now;
             onProgress?.({
                 received: receivedSize,
                 total: metadata.fileSize || 0,
