@@ -142,6 +142,10 @@ export async function createTransfer(file, options = {}) {
             }
         };
 
+        // Track state for ICE candidate queueing
+        let pendingCandidates = [];
+        let hasRemoteDescription = false;
+
         // 4. Join the room as sender
         const joinAsSender = () => {
             socket.emit('join-room', { sessionId, role: 'sender' }, (response) => {
@@ -182,6 +186,15 @@ export async function createTransfer(file, options = {}) {
                     return;
                 }
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                hasRemoteDescription = true;
+
+                // Process any candidates that arrived before the remote description was set
+                for (const candidate of pendingCandidates) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => 
+                        console.error('[Transfer] Error adding queued ICE candidate:', err)
+                    );
+                }
+                pendingCandidates = [];
             } catch (err) {
                 console.error('[Transfer] Error setting remote description:', err);
             }
@@ -191,7 +204,11 @@ export async function createTransfer(file, options = {}) {
         socket.on('ice-candidate', async ({ candidate }) => {
             try {
                 if (peerConnection && candidate) {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    if (!hasRemoteDescription) {
+                        pendingCandidates.push(candidate);
+                    } else {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    }
                 }
             } catch (err) {
                 console.error('[Transfer] Error adding ICE candidate:', err);
@@ -288,6 +305,9 @@ export async function joinTransfer(sessionId, options = {}) {
             };
             socket.on('connect', onReconnect);
 
+            let pendingCandidates = [];
+            let hasRemoteDescription = false;
+
             // 4. Handle offer from sender
             socket.on('offer', async ({ offer }) => {
                 try {
@@ -339,6 +359,16 @@ export async function joinTransfer(sessionId, options = {}) {
 
                     // Set remote description and create answer
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                    hasRemoteDescription = true;
+
+                    // Process queued ICE candidates now that remote description is set
+                    for (const candidate of pendingCandidates) {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => 
+                            console.error('[Transfer] Error adding queued ICE candidate:', err)
+                        );
+                    }
+                    pendingCandidates = [];
+
                     const answer = await peerConnection.createAnswer();
                     await peerConnection.setLocalDescription(answer);
                     socket.emit('answer', { sessionId, answer });
@@ -352,8 +382,12 @@ export async function joinTransfer(sessionId, options = {}) {
             // 5. Handle ICE candidates from sender
             socket.on('ice-candidate', async ({ candidate }) => {
                 try {
-                    if (peerConnection && candidate) {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    if (candidate) {
+                        if (!peerConnection || !hasRemoteDescription) {
+                            pendingCandidates.push(candidate);
+                        } else {
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
                     }
                 } catch (err) {
                     console.error('[Transfer] Error adding ICE candidate:', err);
