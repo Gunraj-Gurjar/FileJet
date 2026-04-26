@@ -1,23 +1,21 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import FileCard from './FileCard';
 
 export default function DropZone({ onFileSelect, selectedFile, disabled }) {
     const [isDragging, setIsDragging] = useState(false);
-    const [cryptoSupported, setCryptoSupported] = useState(true);
-
-
-    useEffect(() => {
+    const [cryptoSupported] = useState(() => {
         if (typeof window !== 'undefined') {
             const hasCrypto = !!(window.crypto && window.crypto.subtle);
             const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
             const isPrivateIP = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(window.location.hostname);
             // Allow on secure contexts OR localhost/LAN (files will transfer without encryption)
-            setCryptoSupported(hasCrypto || isLocalhost || isPrivateIP);
+            return hasCrypto || isLocalhost || isPrivateIP;
         }
-    }, []);
+        return true;
+    });
 
     const isDisabled = disabled || !cryptoSupported;
 
@@ -43,7 +41,7 @@ export default function DropZone({ onFileSelect, selectedFile, disabled }) {
         if (files.length > 0) {
             onFileSelect(files[0]);
         }
-    }, [onFileSelect, disabled]);
+    }, [onFileSelect, isDisabled]);
 
     const handleFileInput = useCallback((e) => {
         if (isDisabled) return;
@@ -51,7 +49,7 @@ export default function DropZone({ onFileSelect, selectedFile, disabled }) {
         if (files.length > 0) {
             onFileSelect(files[0]);
         }
-    }, [onFileSelect]);
+    }, [onFileSelect, isDisabled]);
 
     return (
         <div className="w-full">

@@ -12,6 +12,7 @@ import FeatureGrid from '@/components/FeatureGrid';
 import PricingSection from '@/components/PricingSection';
 import { createTransfer, TRANSFER_STATES } from '@/lib/transferManager';
 import { formatBytes } from '@/lib/utils';
+import { APP_URL } from '@/lib/config';
 
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -34,23 +35,23 @@ export default function HomePage() {
 
     try {
       setTransferState(TRANSFER_STATES.CREATING_SESSION);
-      let appUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+      let currentAppUrl = APP_URL;
       let willBeInsecure = false;
 
-      if (window.location.hostname === 'localhost') {
+      if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
         try {
           const res = await fetch('/api/network-ip');
           if (res.ok) {
             const data = await res.json();
             if (data.ip) {
-              appUrl = `http://${data.ip}:${window.location.port || '3001'}`;
+              currentAppUrl = `http://${data.ip}:${window.location.port || '3000'}`;
               willBeInsecure = true; // receivers on local IP will use HTTP (insecure)
             }
           }
         } catch (e) {
           console.error('Failed to get network IP:', e);
         }
-      } else if (appUrl.startsWith('http://') && window.location.hostname !== 'localhost') {
+      } else if (currentAppUrl.startsWith('http://') && typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
         willBeInsecure = true;
       }
 
@@ -70,7 +71,7 @@ export default function HomePage() {
       });
 
       setShareInfo({
-        shareUrl: `${appUrl}/download/${result.sessionId}`,
+        shareUrl: `${currentAppUrl}/download/${result.sessionId}`,
         encryptionKey: result.encryptionKey,
         sessionId: result.sessionId,
       });

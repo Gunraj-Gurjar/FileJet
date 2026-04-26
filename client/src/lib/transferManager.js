@@ -13,14 +13,12 @@ import { createPeerConnection, createDataChannel, sendFile, receiveFile } from '
 import { DEFAULT_CHUNK_SIZE } from './fileChunker';
 import { generateKey, exportKey, importKey, encryptChunk, decryptChunk } from './encryption';
 
-const getDynamicServerUrl = () => {
-    if (typeof window !== 'undefined') {
-        return `http://${window.location.hostname}:3001`;
-    }
-    return 'http://localhost:3001';
-};
+import { SERVER_URL } from './config';
 
-const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || getDynamicServerUrl();
+const WEBRTC_CONNECT_TIMEOUT_MS = 45 * 1000;
+const MAX_RELAY_FALLBACK_BYTES = 25 * 1024 * 1024;
+const RELAY_ACK_TIMEOUT_MS = 15 * 1000;
+const RELAY_BUFFER_LOW_THRESHOLD = 2 * 1024 * 1024;
 
 /** Transfer states */
 export const TRANSFER_STATES = {
@@ -51,6 +49,7 @@ export async function createTransfer(file, options = {}) {
     let dataChannel = null;
     let encryptionKey = null;
     let keyString = '';
+    let handshakeInProgress = false;
 
     onStateChange?.(TRANSFER_STATES.CREATING_SESSION);
 
@@ -83,11 +82,14 @@ export async function createTransfer(file, options = {}) {
 
         const startHandshake = async () => {
             // Guard: prevent duplicate handshakes if peer-joined fires multiple times
-            if (peerConnection && peerConnection.signalingState !== 'closed') {
-                console.log('[Transfer] Peer connection already exists, ignoring duplicate peer-joined');
+            if (handshakeInProgress || (peerConnection && peerConnection.signalingState !== 'closed')) {
+                console.log('[Transfer] Handshake already active, ignoring duplicate peer-joined');
                 return;
             }
 
+            handshakeInProgress = true;
+            pendingCandidates = [];
+            hasRemoteDescription = false;
             onStateChange?.(TRANSFER_STATES.CONNECTING);
 
             try {
@@ -95,7 +97,8 @@ export async function createTransfer(file, options = {}) {
                 peerConnection = await createPeerConnection();
 
                 // Create data channel
-                dataChannel = createDataChannel(peerConnection);
+                const rtcChannel = createDataChannel(peerConnection);
+                dataChannel = rtcChannel;
 
                 // Handle ICE candidates
                 peerConnection.onicecandidate = (event) => {
@@ -104,45 +107,20 @@ export async function createTransfer(file, options = {}) {
                     }
                 };
 
-                // Track fallback timeout to avoid race conditions
                 let isFallbackActive = false;
-                
-                const fallbackTimeout = setTimeout(() => {
-                    if (dataChannel && dataChannel.readyState === 'open') return;
-                    
-                    console.warn('[Transfer] WebRTC connection timed out (10s). Falling back to Socket Relay.');
-                    isFallbackActive = true;
-                    
-                    // Cleanup WebRTC attempts
-                    peerConnection?.close();
-                    
-                    // Inform receiver to switch to fallback mode
-                    socket.emit('relay-fallback-start', { sessionId });
-                    
-                    // Create mock DataChannel
-                    dataChannel = new SocketDataChannel(socket, sessionId);
-                    
-                    // Manually trigger open to start transfer
-                    setTimeout(() => {
-                        if (dataChannel.onopen) dataChannel.onopen();
-                    }, 500);
-                }, 10000); // 10 second timeout
+                let transferStarted = false;
 
-                // When data channel opens, start sending
-                dataChannel.onopen = async () => {
-                    if (!isFallbackActive) {
-                        clearTimeout(fallbackTimeout);
-                    }
-                    console.log('[Transfer] DataChannel open — starting file transfer');
+                const startSending = async (channel) => {
+                    if (transferStarted) return;
+                    transferStarted = true;
+                    console.log('[Transfer] DataChannel open - starting file transfer');
                     onStateChange?.(TRANSFER_STATES.TRANSFERRING);
 
                     try {
                         const encryption = encrypt ? { encrypt: encryptChunk, key: encryptionKey } : null;
-
-                        // Speed & ETA tracking
                         const speedTracker = createSpeedTracker();
 
-                        await sendFile(file, dataChannel, DEFAULT_CHUNK_SIZE, (progress) => {
+                        await sendFile(file, channel, DEFAULT_CHUNK_SIZE, (progress) => {
                             const { speed, eta } = speedTracker.update(progress.sent, file.size);
                             onProgress?.({
                                 ...progress,
@@ -158,12 +136,51 @@ export async function createTransfer(file, options = {}) {
                     }
                 };
 
+                let fallbackAttempted = false;
+                const fallbackTimeout = setTimeout(() => {
+                    if (dataChannel?.readyState === 'open' || fallbackAttempted) return;
+                    fallbackAttempted = true;
+
+                    if (file.size > MAX_RELAY_FALLBACK_BYTES) {
+                        console.warn('[Transfer] WebRTC connection timed out. Socket relay is disabled for large files to avoid very slow server transfers.');
+                        peerConnection?.close();
+                        onStateChange?.(TRANSFER_STATES.ERROR);
+                        return;
+                    }
+
+                    console.warn(`[Transfer] WebRTC connection timed out after ${WEBRTC_CONNECT_TIMEOUT_MS / 1000}s. Falling back to Socket.IO relay for this small file.`);
+                    isFallbackActive = true;
+
+                    // Cleanup WebRTC attempts
+                    peerConnection?.close();
+
+                    // Inform receiver to switch to fallback mode
+                    socket.emit('relay-fallback-start', { sessionId });
+
+                    // Create mock DataChannel
+                    const relayChannel = new SocketDataChannel(socket, sessionId);
+                    dataChannel = relayChannel;
+                    relayChannel.onopen = () => startSending(relayChannel);
+
+                    // Manually trigger open to start transfer
+                    setTimeout(() => {
+                        relayChannel.onopen?.();
+                    }, 250);
+                }, WEBRTC_CONNECT_TIMEOUT_MS);
+
+                // When data channel opens, start sending
+                rtcChannel.onopen = () => {
+                    if (!isFallbackActive) clearTimeout(fallbackTimeout);
+                    startSending(rtcChannel);
+                };
+
                 // Create and send offer
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
                 socket.emit('offer', { sessionId, offer });
 
             } catch (err) {
+                handshakeInProgress = false;
                 console.error('[Transfer] WebRTC setup error:', err);
                 onStateChange?.(TRANSFER_STATES.ERROR);
             }
@@ -174,9 +191,15 @@ export async function createTransfer(file, options = {}) {
         let hasRemoteDescription = false;
 
         // 4. Join the room as sender
+        let joinedSenderSocketId = null;
         const joinAsSender = () => {
+            if (!socket.connected) return;
+            if (joinedSenderSocketId === socket.id) return;
+            joinedSenderSocketId = socket.id;
+
             socket.emit('join-room', { sessionId, role: 'sender' }, (response) => {
                 if (response?.error) {
+                    joinedSenderSocketId = null;
                     onStateChange?.(TRANSFER_STATES.ERROR);
                     console.error('[Transfer] Join error:', response.error);
                     return;
@@ -194,9 +217,18 @@ export async function createTransfer(file, options = {}) {
 
         const onReconnect = () => {
             console.log('[Transfer] Socket reconnected, re-joining room...');
+            joinedSenderSocketId = null;
             joinAsSender();
         };
         socket.on('connect', onReconnect);
+
+        const onRelayMessage = ({ data }, ack) => {
+            if (dataChannel?.label === 'socket-fallback') {
+                dataChannel.dispatchMessage?.(data);
+            }
+            ack?.({ ok: true });
+        };
+        socket.on('relay-message', onRelayMessage);
 
         // 5. When receiver joins, start WebRTC handshake
         socket.on('peer-joined', async ({ role }) => {
@@ -258,7 +290,7 @@ export async function createTransfer(file, options = {}) {
             socket.off('answer');
             socket.off('ice-candidate');
             socket.off('peer-disconnected');
-            socket.off('relay-message');
+            socket.off('relay-message', onRelayMessage);
             socket.off('peer-disconnected');
         };
 
@@ -307,10 +339,16 @@ export async function joinTransfer(sessionId, options = {}) {
         // 3. Join room as receiver
         return new Promise((resolve, reject) => {
             let hasJoined = false;
+            let joinedReceiverSocketId = null;
 
             const joinAsReceiver = () => {
+                if (!socket.connected) return;
+                if (joinedReceiverSocketId === socket.id) return;
+                joinedReceiverSocketId = socket.id;
+
                 socket.emit('join-room', { sessionId, role: 'receiver', password }, (response) => {
                     if (response?.error) {
+                        joinedReceiverSocketId = null;
                         onStateChange?.(TRANSFER_STATES.ERROR);
                         // Only reject on the first time round
                         if (!hasJoined) reject(new Error(response.error));
@@ -330,6 +368,7 @@ export async function joinTransfer(sessionId, options = {}) {
 
             const onReconnect = () => {
                 console.log('[Transfer] Receiver socket reconnected, re-joining room...');
+                joinedReceiverSocketId = null;
                 joinAsReceiver();
             };
             socket.on('connect', onReconnect);
@@ -337,6 +376,7 @@ export async function joinTransfer(sessionId, options = {}) {
             let pendingCandidates = [];
             let hasRemoteDescription = false;
             let isFallbackActive = false;
+            let isHandlingOffer = false;
             let mockChannel = null;
 
             // Handle WebRTC Fallback Start
@@ -377,29 +417,40 @@ export async function joinTransfer(sessionId, options = {}) {
             });
 
             // Route incoming relay messages to the mock channel
-            socket.on('relay-message', ({ data }) => {
+            socket.on('relay-message', ({ data }, ack) => {
                 if (mockChannel && mockChannel.onmessage) {
-                    mockChannel.onmessage({ data });
+                    mockChannel.dispatchMessage?.(data);
                 }
+                ack?.({ ok: true });
             });
 
             // 4. Handle offer from sender
             socket.on('offer', async ({ offer }) => {
                 if (isFallbackActive) return;
+                if (isHandlingOffer || (peerConnection && peerConnection.signalingState !== 'closed')) {
+                    console.log('[Transfer] Ignoring duplicate offer — peer connection already active');
+                    return;
+                }
+
+                isHandlingOffer = true;
+                pendingCandidates = [];
+                hasRemoteDescription = false;
+
                 try {
                     onStateChange?.(TRANSFER_STATES.CONNECTING);
 
-                    peerConnection = await createPeerConnection();
+                    const pc = await createPeerConnection();
+                    peerConnection = pc;
 
                     // Handle ICE candidates
-                    peerConnection.onicecandidate = (event) => {
+                    pc.onicecandidate = (event) => {
                         if (event.candidate) {
                             socket.emit('ice-candidate', { sessionId, candidate: event.candidate });
                         }
                     };
 
                     // Handle incoming data channel
-                    peerConnection.ondatachannel = (event) => {
+                    pc.ondatachannel = (event) => {
                         const channel = event.channel;
                         console.log('[Transfer] DataChannel received:', channel.label);
 
@@ -434,24 +485,33 @@ export async function joinTransfer(sessionId, options = {}) {
                     };
 
                     // Set remote description and create answer
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                    await pc.setRemoteDescription(new RTCSessionDescription(offer));
                     hasRemoteDescription = true;
 
                     // Process queued ICE candidates now that remote description is set
                     for (const candidate of pendingCandidates) {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => 
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(err =>
                             console.error('[Transfer] Error adding queued ICE candidate:', err)
                         );
                     }
                     pendingCandidates = [];
 
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
+                    if (pc.signalingState !== 'have-remote-offer') {
+                        console.log('[Transfer] Ignoring offer — signalingState:', pc.signalingState);
+                        return;
+                    }
+
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
                     socket.emit('answer', { sessionId, answer });
 
                 } catch (err) {
                     console.error('[Transfer] Error handling offer:', err);
+                    peerConnection?.close();
+                    peerConnection = null;
                     onStateChange?.(TRANSFER_STATES.ERROR);
+                } finally {
+                    isHandlingOffer = false;
                 }
             });
 
@@ -555,6 +615,7 @@ class SocketDataChannel {
         this.sessionId = sessionId;
         this.readyState = 'open';
         this.bufferedAmount = 0;
+        this.bufferedAmountLowThreshold = RELAY_BUFFER_LOW_THRESHOLD;
         this.label = 'socket-fallback';
         this.binaryType = 'arraybuffer';
         
@@ -563,10 +624,32 @@ class SocketDataChannel {
         this.onclose = null;
         this.onerror = null;
         this.onbufferedamountlow = null;
+        this.messageListeners = new Set();
     }
 
     send(data) {
-        this.socket.emit('relay-message', { sessionId: this.sessionId, data });
+        if (this.readyState !== 'open') {
+            throw new Error('Socket relay channel is closed');
+        }
+
+        const payloadSize = getPayloadSize(data);
+        this.bufferedAmount += payloadSize;
+
+        this.socket
+            .timeout(RELAY_ACK_TIMEOUT_MS)
+            .emit('relay-message', { sessionId: this.sessionId, data }, (err, response) => {
+                this.bufferedAmount = Math.max(0, this.bufferedAmount - payloadSize);
+
+                if (err || response?.ok === false) {
+                    const relayError = err || new Error(response?.error || 'Socket relay delivery failed');
+                    console.warn('[Transfer] Socket relay ack failed:', relayError.message || relayError);
+                    this.onerror?.(relayError);
+                }
+
+                if (this.bufferedAmount <= this.bufferedAmountLowThreshold) {
+                    this.onbufferedamountlow?.();
+                }
+            });
     }
 
     close() {
@@ -576,9 +659,27 @@ class SocketDataChannel {
 
     addEventListener(event, callback) {
         if (event === 'close') this.onclose = callback;
+        if (event === 'message') this.messageListeners.add(callback);
     }
     
     removeEventListener(event, callback) {
         if (event === 'close' && this.onclose === callback) this.onclose = null;
+        if (event === 'message') this.messageListeners.delete(callback);
     }
+
+    dispatchMessage(data) {
+        const event = { data };
+        if (this.onmessage) this.onmessage(event);
+        for (const listener of this.messageListeners) {
+            listener(event);
+        }
+    }
+}
+
+function getPayloadSize(data) {
+    if (typeof data === 'string') return data.length;
+    if (data instanceof ArrayBuffer) return data.byteLength;
+    if (ArrayBuffer.isView(data)) return data.byteLength;
+    if (data && typeof data.size === 'number') return data.size;
+    return 0;
 }

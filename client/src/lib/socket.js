@@ -7,19 +7,7 @@
 
 import { io } from 'socket.io-client';
 
-const getDynamicServerUrl = () => {
-    // If we are in production/deployed environment without env var, default to the known Render URL
-    if (process.env.NODE_ENV === 'production' || (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app'))) {
-        return 'https://filejet.onrender.com';
-    }
-    // Local development fallback
-    if (typeof window !== 'undefined') {
-        return `http://${window.location.hostname}:3001`;
-    }
-    return 'http://localhost:3001';
-};
-
-const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || getDynamicServerUrl();
+import { SERVER_URL } from './config';
 
 let socket = null;
 

@@ -23,8 +23,13 @@ const ICE_SERVERS = [
 /** DataChannel buffer threshold for flow control (1MB) */
 const BUFFER_THRESHOLD = 1 * 1024 * 1024;
 
-/** Maximum buffer before pausing sends (4MB) */
-const MAX_BUFFER_SIZE = 4 * 1024 * 1024;
+/** Maximum buffer before pausing sends (6MB) */
+const MAX_BUFFER_SIZE = 6 * 1024 * 1024;
+
+const BUFFER_POLL_INTERVAL_MS = 50;
+const ACK_INTERVAL_CHUNKS = 8;
+const SEND_WINDOW_CHUNKS = 32;
+const ACK_WAIT_TIMEOUT_MS = 15000;
 
 /**
  * Create a configured RTCPeerConnection, fetching ICE servers (TURN) from the backend.
@@ -35,16 +40,7 @@ export async function createPeerConnection() {
 
     try {
         // Build the correct API URL regardless of where Next.js is running (client or SSR)
-        const getDynamicServerUrl = () => {
-            if (process.env.NODE_ENV === 'production' || (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app'))) {
-                return 'https://filejet.onrender.com';
-            }
-            if (typeof window !== 'undefined') {
-                return `http://${window.location.hostname}:3001`;
-            }
-            return 'http://localhost:3001';
-        };
-        const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || getDynamicServerUrl();
+        const { SERVER_URL } = await import('./config');
 
         // Fetch TURN credentials (append timestamp to prevent caching of expired credentials)
         const response = await fetch(`${SERVER_URL}/api/ice-servers?t=${Date.now()}`);
@@ -109,10 +105,33 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
         let chunkIndex = startChunk;
         let cancelled = false;
         let lastProgressTime = 0;
+        let ackedChunks = startChunk;
+        const ackWaiters = new Set();
         const PROGRESS_THROTTLE_MS = 100;
 
         const onClose = () => { cancelled = true; };
         channel.addEventListener('close', onClose);
+
+        const onAckMessage = (event) => {
+            if (typeof event.data !== 'string') return;
+
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type !== 'chunk-ack') return;
+
+                ackedChunks = Math.max(ackedChunks, Number(msg.chunkIndex) || 0);
+                for (const waiter of [...ackWaiters]) {
+                    if (ackedChunks >= waiter.targetChunk) {
+                        waiter.resolve();
+                        ackWaiters.delete(waiter);
+                    }
+                }
+            } catch {
+                // Ignore non-JSON control messages on the sender side.
+            }
+        };
+
+        channel.addEventListener?.('message', onAckMessage);
 
         // Send file metadata first
         const metadata = JSON.stringify({
@@ -127,33 +146,39 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
         });
 
         if (channel.readyState !== 'open') {
-            channel.removeEventListener('close', onClose);
+            cleanupListeners();
             reject(new Error('DataChannel not open'));
             return;
         }
         channel.send(metadata);
 
+        function cleanupListeners() {
+            channel.removeEventListener('close', onClose);
+            channel.removeEventListener?.('message', onAckMessage);
+            for (const waiter of ackWaiters) {
+                clearTimeout(waiter.timeout);
+                waiter.resolve();
+            }
+            ackWaiters.clear();
+        }
+
         async function sendNextChunk() {
             while (chunkIndex < totalChunks) {
                 if (cancelled || channel.readyState !== 'open') {
-                    channel.removeEventListener('close', onClose);
+                    cleanupListeners();
                     reject(new Error('DataChannel closed during transfer'));
                     return;
                 }
 
-                // Flow control: wait for buffer to drain
+                // Receiver ACKs keep the sender from dumping a huge burst into the browser buffer.
+                if (chunkIndex - ackedChunks >= SEND_WINDOW_CHUNKS) {
+                    await waitForAck(chunkIndex - SEND_WINDOW_CHUNKS + ACK_INTERVAL_CHUNKS);
+                    continue;
+                }
+
+                // Flow control: wait for browser buffer to drain if the network side is lagging.
                 if (channel.bufferedAmount > MAX_BUFFER_SIZE) {
-                    await new Promise((res) => {
-                        const timeout = setTimeout(() => {
-                            channel.onbufferedamountlow = null;
-                            res();
-                        }, 10000);
-                        channel.onbufferedamountlow = () => {
-                            clearTimeout(timeout);
-                            channel.onbufferedamountlow = null;
-                            res();
-                        };
-                    });
+                    await waitForBufferRoom(channel);
                     continue;
                 }
 
@@ -172,7 +197,7 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
                 }
 
                 if (channel.readyState !== 'open') {
-                    channel.removeEventListener('close', onClose);
+                    cleanupListeners();
                     reject(new Error('DataChannel closed during transfer'));
                     return;
                 }
@@ -194,16 +219,13 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
                 }
 
                 // Yield to event loop periodically to prevent UI freezes
-                if (chunkIndex % 20 === 0) {
+                if (chunkIndex % 64 === 0) {
                     await new Promise((res) => setTimeout(res, 0));
                 }
             }
 
-            // Wait for ALL buffered data to drain before signaling completion
-            await waitForDrain(channel);
-
-            // Extra safety delay
-            await new Promise((res) => setTimeout(res, 300));
+            // Wait until the receiver has processed every chunk before signaling completion.
+            await waitForAck(totalChunks);
 
             // Send completion signal
             if (channel.readyState === 'open') {
@@ -216,14 +238,72 @@ export function sendFile(file, channel, chunkSize, onProgress, startChunk = 0, e
             // Wait for completion signal to leave buffer
             await waitForDrain(channel);
 
-            channel.removeEventListener('close', onClose);
+            cleanupListeners();
             resolve();
         }
 
+        function waitForAck(targetChunk) {
+            if (ackedChunks >= targetChunk || channel.readyState !== 'open') {
+                return Promise.resolve();
+            }
+
+            return new Promise((resolve) => {
+                const waiter = {
+                    targetChunk,
+                    resolve: () => {
+                        clearTimeout(waiter.timeout);
+                        resolve();
+                    },
+                    timeout: null,
+                };
+
+                waiter.timeout = setTimeout(() => {
+                    ackWaiters.delete(waiter);
+                    resolve();
+                }, ACK_WAIT_TIMEOUT_MS);
+
+                ackWaiters.add(waiter);
+            });
+        }
+
         sendNextChunk().catch((err) => {
-            channel.removeEventListener('close', onClose);
+            cleanupListeners();
             reject(err);
         });
+    });
+}
+
+/**
+ * Wait until the DataChannel has enough room for more data.
+ * Some browsers miss bufferedamountlow under heavy load, so this also polls.
+ */
+function waitForBufferRoom(channel) {
+    return new Promise((resolve) => {
+        let settled = false;
+        let interval = null;
+
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (channel.onbufferedamountlow === finish) {
+                channel.onbufferedamountlow = null;
+            }
+            if (interval) clearInterval(interval);
+            resolve();
+        };
+
+        if (channel.readyState !== 'open' || channel.bufferedAmount <= BUFFER_THRESHOLD) {
+            finish();
+            return;
+        }
+
+        interval = setInterval(() => {
+            if (channel.readyState !== 'open' || channel.bufferedAmount <= BUFFER_THRESHOLD) {
+                finish();
+            }
+        }, BUFFER_POLL_INTERVAL_MS);
+
+        channel.onbufferedamountlow = finish;
     });
 }
 
@@ -280,6 +360,9 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
 
     function tryFinalize() {
         if (finalized) return;
+        // Delay finalization if the decryption queue is still processing
+        if (isProcessingQueue) return;
+
         const totalExpected = expectedTotalChunks || metadata?.totalChunks;
         if (!totalExpected || chunkCount < totalExpected) {
             return;
@@ -325,6 +408,7 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
                 console.log(`[WebRTC] 📦 file-complete signal. Sender sent: ${msg.totalChunksSent}, We have: ${chunkCount}`);
                 fileCompleteReceived = true;
                 expectedTotalChunks = msg.totalChunksSent || metadata?.totalChunks;
+                sendAck(true);
                 tryFinalize();
                 return;
             }
@@ -346,20 +430,51 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
         tryFinalize();
     }
 
-    // For encrypted transfers, we need async processing
-    let asyncQueue = Promise.resolve();
+    function sendAck(force = false) {
+        if (!metadata || channel.readyState !== 'open') return;
+        if (!force && chunkCount % ACK_INTERVAL_CHUNKS !== 0 && chunkCount !== metadata.totalChunks) return;
 
-    async function handleBinaryChunkAsync(chunkData) {
-        try {
-            const packed = new Uint8Array(chunkData);
-            const iv = packed.slice(0, 12);
-            const ciphertext = packed.slice(12).buffer;
-            const decrypted = await decryption.decrypt(decryption.key, iv, ciphertext);
-            handleBinaryChunkSync(decrypted);
-        } catch (err) {
-            console.error('[WebRTC] Decryption error on chunk', chunkCount, ':', err);
-            // Still count the chunk to prevent stalling
-            handleBinaryChunkSync(chunkData);
+        channel.send(JSON.stringify({
+            type: 'chunk-ack',
+            chunkIndex: chunkCount,
+            received: receivedSize,
+        }));
+    }
+
+    // For encrypted transfers, we need async processing
+    const encryptedQueue = [];
+    let isProcessingQueue = false;
+
+    async function processEncryptedQueue() {
+        if (isProcessingQueue) return;
+        isProcessingQueue = true;
+
+        while (encryptedQueue.length > 0) {
+            const chunkData = encryptedQueue.shift();
+            try {
+                const packed = new Uint8Array(chunkData);
+                const iv = packed.slice(0, 12);
+                const ciphertext = packed.subarray(12);
+                const decrypted = await decryption.decrypt(decryption.key, iv, ciphertext);
+                handleBinaryChunkSync(decrypted);
+                sendAck();
+            } catch (err) {
+                console.error('[WebRTC] Decryption error on chunk', chunkCount, ':', err);
+                // Still count the chunk to prevent stalling
+                handleBinaryChunkSync(chunkData);
+                sendAck();
+            }
+            // Yield to event loop periodically to keep UI responsive
+            if (chunkCount % 20 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
+
+        isProcessingQueue = false;
+
+        // If file complete signal was received and queue is now empty, try finalizing
+        if (fileCompleteReceived) {
+            tryFinalize();
         }
     }
 
@@ -371,23 +486,18 @@ export function receiveFile(channel, onProgress, onComplete, onError, decryption
                 return;
             }
 
-            // Copy the ArrayBuffer immediately (browser recycles them)
-            const dataCopy = event.data.slice(0);
+            const chunkData = event.data;
 
-            // Encrypted: queue async decryption (with catch to prevent chain breakage)
+            // Encrypted: push to queue and process asynchronously
             if (decryption && metadata?.encrypted) {
-                asyncQueue = asyncQueue
-                    .then(() => handleBinaryChunkAsync(dataCopy))
-                    .catch((err) => {
-                        console.error('[WebRTC] Queue error:', err);
-                        // Recovery: process chunk without decryption to keep chain alive
-                        handleBinaryChunkSync(dataCopy);
-                    });
+                encryptedQueue.push(chunkData);
+                processEncryptedQueue();
                 return;
             }
 
-            // Non-encrypted: process synchronously (no Promise chain = no chain breakage)
-            handleBinaryChunkSync(dataCopy);
+            // Non-encrypted: process synchronously without an extra full-buffer copy.
+            handleBinaryChunkSync(chunkData);
+            sendAck();
 
         } catch (err) {
             console.error('[WebRTC] onmessage error:', err);

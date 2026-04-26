@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import TransferProgress from '@/components/TransferProgress';
@@ -26,7 +27,7 @@ export default function DownloadPage() {
 
     const [encryptionKey, setEncryptionKey] = useState(null);
 
-    // Get encryption key from URL fragment after mount to avoid hydration mismatch
+    // Initial mount handling to avoid hydration mismatch
     useEffect(() => {
         const hash = window.location.hash;
         const keyMatch = hash.match(/key=([^&]+)/);
@@ -35,23 +36,25 @@ export default function DownloadPage() {
 
     // Fetch session metadata
     useEffect(() => {
+        if (!sessionId) return;
+
         async function fetchSession() {
             try {
-                // Determine server URL dynamically without breaking SSR
-                const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-                const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || `http://${host}:3001`;
-                const res = await fetch(`${serverUrl}/api/sessions/${sessionId}`);
+                // Use centralized SERVER_URL but keep it dynamic for dev
+                const { SERVER_URL } = await import('@/lib/config');
+                const res = await fetch(`${SERVER_URL}/api/sessions/${sessionId}`);
                 if (!res.ok) throw new Error('Session not found or expired');
                 const data = await res.json();
                 setSessionData(data);
                 if (data.hasPassword) setNeedsPassword(true);
             } catch (err) {
+                console.error('[Download] Fetch error:', err);
                 setError(err.message);
             } finally {
                 setLoading(false);
             }
         }
-        if (sessionId) fetchSession();
+        fetchSession();
     }, [sessionId]);
 
     // Start receiving
@@ -121,12 +124,12 @@ export default function DownloadPage() {
                             </div>
                             <h2 className="text-xl font-semibold text-white mb-2">Session Not Found</h2>
                             <p className="text-surface-200/50 mb-6">This transfer session has expired or doesn&apos;t exist.</p>
-                            <a
+                            <Link
                                 href="/"
                                 className="inline-flex items-center gap-2 rounded-full gradient-bg px-6 py-3 text-sm font-medium text-white shadow-lg shadow-brand-500/25"
                             >
                                 Send a New File
-                            </a>
+                            </Link>
                         </motion.div>
                     ) : sessionData && (
                         <motion.div
@@ -250,12 +253,12 @@ export default function DownloadPage() {
                                         </motion.button>
                                     )}
 
-                                    <a
+                                    <Link
                                         href="/"
                                         className="inline-flex items-center gap-2 rounded-full bg-white/5 border border-white/10 px-6 py-3 text-sm font-medium text-white hover:bg-white/10 transition-colors"
                                     >
                                         Send Your Own File
-                                    </a>
+                                    </Link>
                                 </motion.div>
                             )}
 

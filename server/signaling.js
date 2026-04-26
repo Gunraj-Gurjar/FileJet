@@ -39,6 +39,8 @@ function initSignaling(io) {
                 return callback?.({ error: 'Invalid password' });
             }
 
+            const alreadyJoined = socket.data.sessionId === sessionId && socket.data.role === role;
+
             // Join the Socket.IO room
             socket.join(sessionId);
             socket.data.sessionId = sessionId;
@@ -53,13 +55,16 @@ function initSignaling(io) {
                 sessionStore.update(sessionId, { receiverConnected: true });
             }
 
-            // Notify the other peer
-            socket.to(sessionId).emit('peer-joined', { role, socketId: socket.id });
+            // Notify the other peer only on the first join for this socket/role.
+            if (!alreadyJoined) {
+                socket.to(sessionId).emit('peer-joined', { role, socketId: socket.id });
+            }
 
-            console.log(`[Signaling] ${role} joined room ${sessionId}`);
+            console.log(`[Signaling] ${role} ${alreadyJoined ? 'rejoined' : 'joined'} room ${sessionId}`);
 
             callback?.({
                 success: true,
+                alreadyJoined,
                 session: {
                     id: session.id,
                     fileName: session.fileName,
@@ -121,9 +126,16 @@ function initSignaling(io) {
             socket.to(sessionId).emit('relay-fallback-start');
         });
 
-        socket.on('relay-message', ({ sessionId, data }) => {
-            // Relay the ArrayBuffer or string directly
-            socket.to(sessionId).emit('relay-message', { data });
+        socket.on('relay-message', ({ sessionId, data }, callback) => {
+            // Relay the ArrayBuffer or string directly and acknowledge once the receiver has it.
+            socket.to(sessionId).timeout(10000).emit('relay-message', { data }, (err) => {
+                if (err) {
+                    callback?.({ ok: false, error: 'Receiver did not acknowledge relay data' });
+                    return;
+                }
+
+                callback?.({ ok: true });
+            });
         });
 
         // 10. Handle disconnections
