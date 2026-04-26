@@ -5,7 +5,7 @@
   <p>
     <img src="https://img.shields.io/badge/WebRTC-P2P-blue?style=for-the-badge" alt="WebRTC" />
     <img src="https://img.shields.io/badge/Encryption-AES_256_GCM-green?style=for-the-badge" alt="Encryption" />
-    <img src="https://img.shields.io/badge/Next.js-15-black?style=for-the-badge" alt="Next.js" />
+    <img src="https://img.shields.io/badge/Next.js-16-black?style=for-the-badge" alt="Next.js" />
     <img src="https://img.shields.io/badge/Max_Size-100GB+-purple?style=for-the-badge" alt="Max Size" />
   </p>
   <p>
@@ -66,7 +66,8 @@ FileJet is a production-ready, peer-to-peer file sharing platform. Files transfe
 ## Recent Updates
 
 - **Local Network QR Code Sharing**: Implemented a dynamic API route (`/api/network-ip`) that detects the host's LAN IP. Scanning the generated QR code with a phone seamlessly routes directly to the application on your local Wi-Fi, bypassing `localhost` limitations.
-- **Robust WebRTC DataChannels**: Eliminated P2P transfer stalling (previously hanging at 86%). Removed unreliable `maxRetransmits` settings to ensure TCP-like reliability and updated the receiver logic to independently assemble file chunks without race-prone completion events.
+- **Windowed WebRTC Flow Control**: Added receiver acknowledgements and a bounded send window so large transfers do not stall when the browser DataChannel buffer fills. Validated with 40MB and 140MB browser transfer smoke tests.
+- **Robust WebRTC DataChannels**: Eliminated P2P transfer stalling and duplicate-offer crashes. Removed unreliable `maxRetransmits` settings, guarded duplicate room joins, and made receiver logic independently assemble file chunks without race-prone completion events.
 - **Production-Ready NAT Traversal (TURN)**: Integrated **Metered** TURN servers to guarantee connection success for users behind symmetric NATs, mobile carrier networks, and restrictive corporate firewalls. Short-lived TURN credentials are automatically fetched via our signaling server backend without exposing the master key.
 - **Mobile Background Resilience**: Engineered a robust WebRTC handshake recovery mechanism. If a mobile browser is suspended in the background (putting the Socket.IO connection to sleep), the client now automatically re-joins the transfer room and resumes signaling to correctly initialize the relay, avoiding cross-network deadlocks.
 
@@ -76,7 +77,7 @@ FileJet is a production-ready, peer-to-peer file sharing platform. Files transfe
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Next.js 15, React 19, Tailwind CSS 4 |
+| Frontend | Next.js 16, React 19, Tailwind CSS 4 |
 | Animations | Framer Motion |
 | Backend | Node.js, Express, Socket.IO |
 | Networking | WebRTC DataChannels, STUN, **Metered TURN** |
@@ -194,7 +195,7 @@ The signaling server is deployed on **Render** at:
 | Variable | Description |
 |----------|-------------|
 | `NODE_ENV` | `production` |
-| `CLIENT_URL` | Frontend origin for CORS |
+| `CLIENT_URL` | `https://filejet-client-eta.vercel.app` |
 | `METERED_DOMAIN` | Metered.ca app domain |
 | `TURN_SECRET_KEY` | Metered.ca API secret key |
 
@@ -202,7 +203,7 @@ The signaling server is deployed on **Render** at:
 - Health check: [`/health`](https://filejet.onrender.com/health)
 - ICE servers: [`/api/ice-servers`](https://filejet.onrender.com/api/ice-servers)
 
-> ⚠️ Free tier instances spin down after inactivity (~50s cold start on first request).
+> ⚠️ Free tier instances spin down after inactivity. For the smoothest first transfer after idle time, keep the backend warm or use an always-on Render instance.
 
 ### Frontend → Vercel ✅ (Live)
 
@@ -220,6 +221,14 @@ The Next.js client is deployed on **Vercel** at:
 | Variable | Description |
 |----------|-------------|
 | `NEXT_PUBLIC_SERVER_URL` | `https://filejet.onrender.com` |
+| `NEXT_PUBLIC_APP_URL` | `https://filejet-client-eta.vercel.app` |
+
+**Production transfer checklist:**
+- Vercel root directory must be `client`.
+- Render root directory must be `server`.
+- `/health` on Render must return `status: "ok"`.
+- `/api/ice-servers` must return Metered STUN/TURN servers.
+- Test one small file and one 100MB+ file after every WebRTC/signaling change.
 
 ### Database (Optional)
 
@@ -283,7 +292,7 @@ For persistent sessions, replace `sessionStore.js` with MongoDB:
 | Transport | DTLS (WebRTC built-in) |
 | Session Tokens | UUID-based, auto-expiring (24h TTL) |
 | Password Links | Optional per-session password |
-| CORS | Strict origin allowlist |
+| CORS | Origin-reflecting CORS for Vercel previews and deployed client origins |
 
 ---
 

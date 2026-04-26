@@ -1,0 +1,59 @@
+FileJet Debug Work - 2026-04-26
+
+Original request
+- Keep the original project safe.
+- Duplicate the project first.
+- Debug slow/stuck transfers from scratch.
+- Make the fixed version deploy smoothly on Vercel.
+
+Safety steps
+- Created a duplicate workspace at D:\Project-02 FileJet-debug.
+- Did all debugging and code changes in the duplicate first.
+- Later synced the original folder after the fixes were validated and pushed.
+- Preserved the original folder's pre-sync uncommitted state in a git stash named:
+  "backup before syncing debug fixes"
+
+Main bugs found
+- WebRTC fallback was too aggressive. A 10 second timeout could switch transfers to Socket.IO relay, which is much slower for real files.
+- Sender and receiver could join the same room twice, causing duplicate WebRTC offers.
+- Duplicate offers caused this browser error:
+  Failed to execute 'createAnswer' on 'RTCPeerConnection'
+- Large transfers could stall around 16 MB because the sender filled the browser DataChannel buffer too far ahead of the receiver.
+- Next.js dev mode could pick the wrong Turbopack root because the repository has root and client lockfiles.
+
+Main fixes made
+- Added shared client URL config in client/src/lib/config.js.
+- Added duplicate join and duplicate handshake guards in client/src/lib/transferManager.js.
+- Made the signaling server idempotent for same socket room rejoins in server/signaling.js.
+- Reworked WebRTC sending flow in client/src/lib/webrtc.js:
+  - Receiver sends chunk acknowledgements.
+  - Sender uses a bounded send window.
+  - Browser buffer limit was reduced to avoid stall-prone bursts.
+  - Completion waits for receiver acknowledgement instead of only local buffer drain.
+- Kept Socket.IO relay only as a small-file fallback, not as the normal large-file path.
+- Added socket relay acknowledgement/backpressure for fallback mode.
+- Pinned Next.js Turbopack root in client/next.config.mjs.
+- Added client/vercel.json for Vercel deployment defaults.
+- Added DEPLOYMENT.md with Vercel and Render setup instructions.
+- Updated .env.example with production examples.
+
+Validation performed
+- npm run lint: passed.
+- npm run build: passed.
+- Local backend health: passed.
+- Live Render backend /health: passed.
+- Live Render /api/ice-servers returned TURN servers.
+- Browser transfer smoke test with a small file: passed.
+- Browser transfer smoke test with 40 MB file: passed.
+- Browser transfer smoke test with 140 MB file: passed.
+
+Deployment notes
+- Frontend live URL:
+  https://filejet-client-eta.vercel.app
+- Backend live URL:
+  https://filejet.onrender.com
+- Vercel should use:
+  NEXT_PUBLIC_SERVER_URL=https://filejet.onrender.com
+  NEXT_PUBLIC_APP_URL=https://filejet-client-eta.vercel.app
+- Render should have Metered TURN credentials configured.
+- Render free tier has cold starts. For smoother first transfer after inactivity, keep Render warm or use a paid/always-on instance.
